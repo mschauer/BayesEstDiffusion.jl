@@ -10,7 +10,7 @@
 # http://sdejl.readthedocs.org/en/latest/
 module SDE
 using Cubature
-include("Schauder.jl")
+#include("Schauder.jl")
 #using Debug
 #using Randm
 #using Distributions
@@ -18,14 +18,15 @@ include("Schauder.jl")
 
 import Base.length
 import Base.vec
+import Base: copy
 
 export b, sigma, a, H, r, p, Bstar, Bcirc, Bsharp, euler, euler!, guidedeuler, guidedeuler!,  llikeliXcirc, samplep, lp, linexact, linll
  
 export CTPro, CTPath, UvPath, MvPath, MvPro, UvPro
-export UvLinPro, UvAffPro, MvWiener, MvLinPro, MvAffPro, Wiener, Diffusion
+export UvLinPro, UvAffPro, MvWiener, MvLinPro, MvAffPro, Wiener, Diffusion, UvTime
 export diff1, resample!, sample, samplebridge, setv!
 
-export soft, tofs, uofx, xofu, XofU, XofU!, UofX, eulerU, eulerU!, llikeliU, MvLinProInhomog, Phims
+export soft, tofs, txofsu, uofx, xofu, XofU, XofU!, UofX, UofX!, eulerU, eulerU!, llikeliU, MvLinProInhomog, Phims
 
 #%  Miscellaneous
 #%  ~~~~~~~~~~~~~
@@ -71,7 +72,7 @@ cumsum!(v::AbstractVector) = Base.cumsum_pairwise(v, v,  zero(v[1]), 1, length(v
 
  
 function randn!{T,N}(X::StridedArray{T, N})
-    i = length(x)
+    n = length(X)
     for i in 1:n
         X[i] = randn()
     end
@@ -116,7 +117,7 @@ UvPath(tt::Array{Float64,1}) = UvPath(tt, zeros(length(tt)))
 
 type Wiener{Rank}  <: CTPro{Rank}
     #dims::NTuple{Rank-1, Int}  #would be nice to do that.
-    dims::Tuple
+    dims
 end
 
 Wiener() =  Wiener{1}(())
@@ -128,7 +129,7 @@ Wiener{Dim}(dims::NTuple{Dim,Int}) = Wiener{Dim+1}(dims)
 
 function resample!(W::CTPath, P::Wiener)
     assert(P.dims == size(W.yy)[1:end-1])
-    sz = prod(P.dims)
+    sz = prod(P.dims)::Int
     for i = 2:length(W.tt)
         rootdt = sqrt(W.tt[i]-W.tt[i-1])
         for j = 1:sz
@@ -280,6 +281,13 @@ type UvAffPro <: UvPro
     Sigma::Float64
 end
 
+type UvTime <: UvPro
+    beta
+    Beta
+    Sigma::Float64
+end
+
+
 typealias AffPro Union(UvAffPro, MvAffPro)
 
 typealias LinPro Union(UvLinPro, MvLinPro)
@@ -309,11 +317,15 @@ function b(s, x, P::AffPro)
     P.mu
 end
 
+function b(s, x, P::UvTime)
+    P.beta(s)
+end
+
 function a(s, x, P::Union(MvLinPro, MvAffPro))
     P.A
 end
 
-function a(s, x, P::Union(UvLinPro, UvAffPro))
+function a(s, x, P::Union(UvLinPro, UvAffPro, UvTime))
     P.Sigma*P.Sigma'
 end
 
@@ -327,7 +339,7 @@ function sigma(s, x, P::AffPro)
 end
 
 
-function gamma(P::UvAffPro)
+function gamma(P::Union(UvAffPro, UvTime))
     inv(P.Sigma*P.Sigma)    
 end 
 function gamma(P::MvAffPro)
@@ -348,6 +360,10 @@ function mu(t, x, T, P::AffPro)
     x + (T-t) * P.mu
 end    
 
+function mu(t, x, T, P::UvTime)
+    x + (P.Beta(T) - P.Beta(t))
+end    
+
 #%  .. function:: K(t, T, P)
 #%           
 #%      Covariance matrix :math:`Cov(X_{T}-x_t)`
@@ -361,7 +377,7 @@ end
 function K(t, T, P::MvAffPro)
      (T-t)*P.A
 end
-function K(t, T, P::UvAffPro)
+function K(t, T, P::Union(UvAffPro, UvTime))
      (T-t)*P.sigma^2
 end
 
@@ -380,7 +396,7 @@ end
 
 Hinv(t, T, P::MvAffPro) = K(t, T, P::MvAffPro)
 
-function H(t, T, P::LinPro, x)
+function Hx(t, T, P::LinPro, x)
      phim = expm(-(T-t)*P.B)
     (phim*P.lambda*phim'-P.lambda)\x
 end
@@ -393,7 +409,14 @@ end
 function H(t, T, P::AffPro)
     gamma(P)/(T-t)
 end
-function H(t, T, P::AffPro, x)
+function Hx(t, T, P::AffPro, x)
+    gamma(P)/(T-t)*x
+end
+
+function H(t, T, P::UvTime)
+    gamma(P)/(T-t)
+end
+function Hx(t, T, P::UvTime, x)
     gamma(P)/(T-t)*x
 end
 
@@ -401,7 +424,7 @@ end
 # cholesky factor of H^{-1}, note that x'inv(K)*x =  norm(chol(K, :L)\x)^2
 
 function L(t,T, P::MvPro)
-    chol(Hinv(t, T, P), :L)
+    chol(Hinv(t, T, P), Val{:L})
 end
 
 
@@ -420,6 +443,11 @@ function V(t, T, v, P::UvAffPro)
     return v - (T-t)*P.mu
 end
 
+function V(t, T, v, P::UvTime)
+    return v - (P.Beta(T)-P.Beta(t))
+end
+
+
 
 #%  .. function:: r(t, x, T, v, P)
 #%           
@@ -428,7 +456,7 @@ end
 #%  
 
 function r(t, x, T, v, P)
-    SDE.H(t, T, P, SDE.V(t, T, v, P)-x)
+    Hx(t, T, P, V(t, T, v, P)-x)
 end
 
 
@@ -488,7 +516,7 @@ function samplep(t, x, T, P::MvLinPro)
     
     m = mu(t, x, T, P)
     k = K(t, T, P)
-    l = chol(k,:L)
+    l = chol(k,Val{:L})
 
     z = randn(P.d)
     m + l*z
@@ -552,7 +580,7 @@ end
 function varlp(t, x, T, y, ph, B, beta, a)
     z = (x -  varV(t,T, y, ph, B, t -> beta))
     Q = varQ(t, T, ph,  B, a )
-    l = chol(Q, :L)
+    l = chol(Q, Val{:L})
     K =  expm(ph(T,t)*B)*Q*expm(ph(T,t)*B)'
     -1/2*length(x)*log(2pi) -log(prod(diag(chol(K)))) - 0.5*norm(l\z)^2
 end
@@ -564,7 +592,7 @@ end
 #%  
 #%      Multivariate euler scheme for ``U``, starting in ``u`` using the same time grid as the underlying Wiener process ``W``.
 #%      
-
+copy(W::UvPath) = UvPath(copy(W.tt), copy(W.yy))
 euler(u, W::UvPath, P::UvPro) = euler!(UvPath(copy(W.tt), copy(W.yy)),u, W, P)
  
 function euler!(Y::UvPath, u, W::UvPath, P::UvPro)
@@ -841,16 +869,16 @@ Phims(s, T, B) = expm(-T*(1. - s/T)^2*B)
 
 function Ju(s,T, P::LinPro, x, phim = expm(-T*(1. - s/T)^2*P.B))
      sl = P.lambda*T/(T-s)^2
-#    ( phim*sl*phim'-sl)\x
+    ( phim*sl*phim'-sl)\x
 #    LAPACK.sysv!('L', phim*sl*phim'-sl, copy(x))[1]
-     LAPACK.posv!('L', phim*sl*phim'-sl, copy(x))[2]
+#     LAPACK.posv!('L', phim*sl*phim'-sl, copy(x))[2]
 end
 function Ju!(s,T, P::LinPro, j, x, phim = expm(-T*(1. - s/T)^2*P.B))
      j[:] = phim*P.lambda*phim'-P.lambda
      j[:] *= T/(T-s)^2
-#    ( phim*sl*phim'-sl)\x
+     j\x
 #    LAPACK.sysv!('L', phim*sl*phim'-sl, copy(x))[1]
-     LAPACK.posv!('L', j, x)[2]
+#     LAPACK.posv!('L', j, x)[2]
 end
 
 
@@ -862,12 +890,6 @@ function J(s,T, P::LinPro, phim = expm(-T*(1. - s/T)^2*P.B))
     sl = P.lambda*T/(T-s)^2
     inv( phim*sl*phim'-sl)
 end
-
-function JLI(s,T, P::LinPro, phim = expm(-T*(1. - s/T)^2*P.B))
-    sl = P.lambda*T/(T-s)^2
-    chol( phim*sl*phim'-sl, :L)
-end
-
 
 function J(s,T, P::AffPro, _ = 0)
     gamma(P)
